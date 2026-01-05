@@ -515,6 +515,64 @@ def _display_analysis(analysis: "Analysis") -> None:
             console.print(f"     {rec.get('interpretation', '')}")
 
 
+@cli.command("ingest-outcomes")
+@click.option("--sport", default="basketball_nba", help="Sport key for The Odds API")
+@click.option("--days", default=3, help="Days back to fetch scores (1-3)")
+@click.pass_context
+def ingest_outcomes(ctx: click.Context, sport: str, days: int) -> None:
+    """Ingest final scores for completed games.
+
+    Fetches results from The Odds API and creates Outcome records
+    for games that have snapshots but no outcome yet.
+    """
+    from sportsbetsinfo.config.settings import get_settings
+    from sportsbetsinfo.services.outcomes import OutcomeService
+
+    settings = get_settings()
+
+    if not settings.odds_api_configured:
+        console.print("[red]Odds API key not configured![/red]")
+        return
+
+    console.print(f"Fetching completed {sport} games (last {days} days)...")
+
+    async def _ingest() -> None:
+        async with OutcomeService(settings) as service:
+            # Show pending games first
+            pending = service.get_games_needing_outcomes()
+            if pending:
+                console.print(f"[dim]Games needing outcomes: {len(pending)}[/dim]")
+
+            outcomes = await service.ingest_outcomes(sport=sport, days_from=days)
+
+            if not outcomes:
+                console.print("[yellow]No new outcomes to ingest[/yellow]")
+                console.print("[dim]Either no completed games found, or outcomes already exist[/dim]")
+                return
+
+            table = Table(title="Outcomes Ingested")
+            table.add_column("Game", style="cyan")
+            table.add_column("Score", justify="center")
+            table.add_column("Winner", style="green")
+            table.add_column("Occurred", style="dim")
+
+            for outcome in outcomes:
+                stats = outcome.stats_summary
+                away = stats.get("away_team", "?")
+                home = stats.get("home_team", "?")
+                game = f"{away} @ {home}"
+                score = f"{outcome.final_score.away}-{outcome.final_score.home}"
+                winner = outcome.winner or "?"
+                occurred = outcome.occurred_at.strftime("%Y-%m-%d %H:%M")
+
+                table.add_row(game, score, winner, occurred)
+
+            console.print(table)
+            console.print(f"\n[green]Ingested {len(outcomes)} outcome(s)[/green]")
+
+    asyncio.run(_ingest())
+
+
 @cli.command()
 @click.pass_context
 def config(ctx: click.Context) -> None:
