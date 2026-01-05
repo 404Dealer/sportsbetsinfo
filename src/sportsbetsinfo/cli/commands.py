@@ -397,6 +397,125 @@ def verify(ctx: click.Context) -> None:
 
 
 @cli.command()
+@click.argument("game_id", required=False)
+@click.option("--all", "analyze_all", is_flag=True, help="Analyze all games with snapshots")
+@click.pass_context
+def analyze(ctx: click.Context, game_id: str | None, analyze_all: bool) -> None:
+    """Analyze snapshots comparing Kalshi vs Vegas (with vig).
+
+    Creates Analysis objects with edge calculations.
+    Use --all to analyze all games, or provide a specific GAME_ID.
+    """
+    from sportsbetsinfo.config.settings import get_settings
+    from sportsbetsinfo.services.analyzer import AnalysisService
+
+    if not game_id and not analyze_all:
+        console.print("[red]Provide a GAME_ID or use --all[/red]")
+        return
+
+    settings = get_settings()
+    service = AnalysisService(settings)
+
+    if analyze_all:
+        console.print("Analyzing all games with snapshots...")
+        analyses = service.analyze_all_games()
+
+        if not analyses:
+            console.print("[yellow]No analyses created (no matching data)[/yellow]")
+            return
+
+        table = Table(title="Analyses Created")
+        table.add_column("Analysis ID", style="dim")
+        table.add_column("Games", justify="right")
+        table.add_column("Matched", justify="right")
+        table.add_column("Edges", justify="right", style="yellow")
+        table.add_column("Avg Delta", justify="right")
+
+        for analysis in analyses:
+            derived = analysis.derived_features
+            conclusions = analysis.conclusions
+            table.add_row(
+                analysis.analysis_id[:8] + "...",
+                str(derived.get("game_count", 0)),
+                str(derived.get("matched_count", 0)),
+                str(derived.get("edges_above_threshold", 0)),
+                f"{conclusions.get('avg_delta_percent', 0):+.1f}%",
+            )
+
+        console.print(table)
+        console.print(f"\n[green]Created {len(analyses)} analysis(es)[/green]")
+
+    else:
+        console.print(f"Analyzing game [cyan]{game_id}[/cyan]...")
+        analysis = service.analyze_game(game_id)
+
+        if not analysis:
+            console.print(f"[yellow]No snapshot found for game {game_id}[/yellow]")
+            return
+
+        _display_analysis(analysis)
+
+
+def _display_analysis(analysis: "Analysis") -> None:
+    """Display a single analysis in detail."""
+    from sportsbetsinfo.core.models import Analysis
+
+    derived = analysis.derived_features
+    conclusions = analysis.conclusions
+
+    console.print(f"\n[bold]Analysis: {analysis.analysis_id[:8]}...[/bold]")
+    console.print(f"  Version: {analysis.analysis_version}")
+    console.print(f"  Created: {analysis.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+    console.print(f"  Code: {analysis.code_version[:8]}...")
+
+    console.print(f"\n[bold]Summary:[/bold]")
+    console.print(f"  {conclusions.get('summary', 'No summary')}")
+
+    console.print(f"\n[bold]Stats:[/bold]")
+    console.print(f"  Games analyzed: {conclusions.get('total_games', 0)}")
+    console.print(f"  Matched with Kalshi: {conclusions.get('matched_with_kalshi', 0)}")
+    console.print(f"  Avg Vegas vig: {conclusions.get('avg_vegas_vig_percent', 0):.1f}%")
+    console.print(f"  Avg delta: {conclusions.get('avg_delta_percent', 0):+.1f}%")
+    console.print(f"  Significant edges (>3%): {conclusions.get('significant_edges', 0)}")
+
+    # Show comparisons table
+    comparisons = derived.get("comparisons", [])
+    if comparisons:
+        console.print(f"\n[bold]Comparisons:[/bold]")
+        comp_table = Table()
+        comp_table.add_column("Game", style="cyan")
+        comp_table.add_column("Vegas", justify="right")
+        comp_table.add_column("Kalshi", justify="right")
+        comp_table.add_column("Delta", justify="right")
+        comp_table.add_column("Status")
+
+        for comp in comparisons[:10]:  # Show top 10
+            game = f"{comp.get('away_team', '?')[:10]} @ {comp.get('home_team', '?')[:10]}"
+            vegas = f"{comp.get('vegas_home_prob', 0):.1%}"
+            if comp.get("matched"):
+                kalshi = f"{comp.get('kalshi_implied_prob', 0):.1%}"
+                delta = comp.get("delta_home_percent", 0)
+                delta_str = f"{delta:+.1f}%"
+                if abs(delta) > 3:
+                    delta_str = f"[yellow]{delta_str}[/yellow]"
+            else:
+                kalshi = "-"
+                delta_str = "-"
+            status = comp.get("game_status", "?")
+            comp_table.add_row(game, vegas, kalshi, delta_str, status)
+
+        console.print(comp_table)
+
+    # Show recommendations
+    recommendations = analysis.recommended_actions
+    if recommendations:
+        console.print(f"\n[bold]Recommendations:[/bold]")
+        for i, rec in enumerate(recommendations[:3], 1):
+            console.print(f"  {i}. [yellow]{rec.get('signal', '')}[/yellow]")
+            console.print(f"     {rec.get('interpretation', '')}")
+
+
+@cli.command()
 @click.pass_context
 def config(ctx: click.Context) -> None:
     """Show current configuration."""
