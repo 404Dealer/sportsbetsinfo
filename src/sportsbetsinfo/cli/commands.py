@@ -156,9 +156,10 @@ def collect_day(ctx: click.Context, target_date: str | None, sport: str) -> None
                 return
 
             table = Table(title=f"Games Collected: {parsed_date}")
-            table.add_column("Game ID", style="dim")
+            table.add_column("Status", style="bold")
             table.add_column("Teams", style="cyan")
-            table.add_column("Start Time (UTC)", style="green")
+            table.add_column("Score", justify="center")
+            table.add_column("Time (UTC)", style="green")
             table.add_column("Snapshot", style="dim")
 
             for snapshot in snapshots:
@@ -166,22 +167,45 @@ def collect_day(ctx: click.Context, target_date: str | None, sport: str) -> None
                 events = snapshot.normalized_fields.get("odds_api_events", [])
                 if events:
                     event = events[0]
-                    teams = f"{event.get('away_team', '?')} @ {event.get('home_team', '?')}"
+                    away = event.get("away_team", "?")
+                    home = event.get("home_team", "?")
+                    teams = f"{away} @ {home}"
+
+                    # Game status
+                    game_status = event.get("game_status", "pre_game")
+                    if game_status == "completed":
+                        status = "[green]FINAL[/green]"
+                    elif game_status == "in_progress":
+                        status = "[yellow]LIVE[/yellow]"
+                    else:
+                        status = "[dim]PRE[/dim]"
+
+                    # Score
+                    home_score = event.get("home_score")
+                    away_score = event.get("away_score")
+                    if home_score is not None and away_score is not None:
+                        score = f"{away_score}-{home_score}"
+                    else:
+                        score = "-"
+
+                    # Time
                     start_time = event.get("commence_time", "?")
                     if start_time and start_time != "?":
-                        # Format time nicely
                         try:
                             dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
                             start_time = dt.strftime("%H:%M")
                         except (ValueError, AttributeError):
                             pass
                 else:
+                    status = "[dim]?[/dim]"
                     teams = "Unknown"
+                    score = "-"
                     start_time = "?"
 
                 table.add_row(
-                    snapshot.game_id[:12] + "...",
+                    status,
                     teams,
+                    score,
                     start_time,
                     snapshot.snapshot_id[:8] + "...",
                 )

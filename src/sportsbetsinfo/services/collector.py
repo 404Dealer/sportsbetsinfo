@@ -190,15 +190,17 @@ class DataCollector:
         self,
         target_date: date | None = None,
         sport: str = "basketball_nba",
+        include_completed: bool = True,
     ) -> list[InfoSnapshot]:
         """Collect snapshots for all games on a specific date.
 
-        Fetches events from The Odds API and creates a snapshot for
-        each game scheduled on the target date (UTC).
+        Fetches events from The Odds API (including scores for completed games)
+        and creates a snapshot for each game on the target date.
 
         Args:
             target_date: Date to collect games for (UTC). Defaults to today.
             sport: Sport key for The Odds API
+            include_completed: Whether to include completed games with scores
 
         Returns:
             List of created snapshots for games on that date
@@ -210,28 +212,98 @@ class DataCollector:
         if target_date is None:
             target_date = datetime.now(timezone.utc).date()
 
-        # Get all upcoming events
-        odds_data = await self._odds_api.get_markets(
+        # Get events with scores (combines odds + scores endpoints)
+        day_events = await self._odds_api.get_events_with_scores(
             sport=sport,
-            markets="h2h,spreads,totals",
+            target_date=target_date,
+            days_from=3,  # Look back 3 days for completed games
         )
-
-        # Filter to target date
-        events = odds_data.get("events", [])
-        day_events = self._odds_api.filter_events_by_date(events, target_date)
 
         # Create snapshot for each game
         snapshots = []
+        seen_matchups: set[str] = set()  # Deduplicate by team matchup
+
         for event in day_events:
             event_id = event.get("id")
-            if event_id:
-                snapshot = await self.collect_snapshot(
-                    game_id=event_id,
-                    sport=sport,
-                )
-                snapshots.append(snapshot)
+            if not event_id:
+                continue
+
+            # Deduplicate by matchup (some events appear multiple times)
+            matchup_key = f"{event.get('away_team')}@{event.get('home_team')}"
+            if matchup_key in seen_matchups:
+                continue
+            seen_matchups.add(matchup_key)
+
+            # Skip completed games if not requested
+            if not include_completed and event.get("completed"):
+                continue
+
+            snapshot = await self._collect_snapshot_for_event(event, sport)
+            snapshots.append(snapshot)
 
         return snapshots
+
+    async def _collect_snapshot_for_event(
+        self,
+        event: dict[str, Any],
+        sport: str,
+    ) -> InfoSnapshot:
+        """Create a snapshot for a specific event with full data.
+
+        Args:
+            event: Event data from get_events_with_scores
+            sport: Sport key
+
+        Returns:
+            Created InfoSnapshot
+        """
+        collected_at = datetime.now(timezone.utc)
+        event_id = event.get("id", "unknown")
+
+        # Collect raw data
+        raw_payloads: dict[str, Any] = {"odds_api_event": event}
+        normalized_fields: dict[str, Any] = {}
+
+        # Normalize the event with status and scores
+        normalized_event = self._odds_api.normalize_event_with_status(event)
+        normalized_fields["odds_api_events"] = [normalized_event]
+        normalized_fields["odds_api_requests_remaining"] = self._odds_api.requests_remaining
+
+        # Kalshi data (if available)
+        if self._kalshi:
+            try:
+                kalshi_data = await self._kalshi.get_markets(
+                    series_ticker=sport.upper().split("_")[-1]
+                )
+                raw_payloads["kalshi"] = kalshi_data
+                kalshi_normalized = [
+                    self._kalshi.normalize_market_data(market)
+                    for market in kalshi_data.get("markets", [])
+                ]
+                normalized_fields["kalshi_markets"] = kalshi_normalized
+            except Exception as e:
+                raw_payloads["kalshi_error"] = str(e)
+
+        # Create source versions
+        source_versions = SourceVersions(
+            kalshi=self._kalshi.get_version() if self._kalshi else "",
+            odds_api=self._odds_api.get_version() if self._odds_api else "",
+        )
+
+        # Create and save snapshot
+        snapshot = InfoSnapshot.create(
+            game_id=event_id,
+            collected_at=collected_at,
+            schema_version=self.settings.schema_version,
+            source_versions=source_versions,
+            raw_payloads=raw_payloads,
+            normalized_fields=normalized_fields,
+        )
+
+        # Persist to database
+        with get_connection(self.settings.db_path) as conn:
+            repo = SnapshotRepository(conn)
+            return repo.insert(snapshot)
 
     def get_latest_snapshot(self, game_id: str) -> InfoSnapshot | None:
         """Get the most recent snapshot for a game.

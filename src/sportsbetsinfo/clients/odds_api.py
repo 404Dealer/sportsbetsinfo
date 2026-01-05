@@ -266,3 +266,129 @@ class OddsAPIClient(BaseAPIClient):
                 if commence_dt.date() == target_date:
                     filtered.append(event)
         return filtered
+
+    async def get_events_with_scores(
+        self,
+        sport: str,
+        target_date: date | None = None,
+        days_from: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Get events with both odds and scores, properly categorized by game state.
+
+        Combines data from odds and scores endpoints to provide complete
+        game information including pre-game, in-progress, and final states.
+
+        Args:
+            sport: Sport key (e.g., "basketball_nba")
+            target_date: Optional date to filter by (UTC)
+            days_from: Days back to fetch scores (1-3)
+
+        Returns:
+            List of events with game_status: "pre_game", "in_progress", or "completed"
+        """
+        # Get upcoming/live odds
+        odds_data = await self.get_markets(
+            sport=sport,
+            markets="h2h,spreads,totals",
+        )
+        odds_events = odds_data.get("events", [])
+
+        # Get recent scores
+        scores_data = await self.get_scores(sport, days_from=days_from)
+
+        # Build a lookup of scores by event ID
+        scores_by_id: dict[str, dict[str, Any]] = {}
+        for score_event in scores_data:
+            event_id = score_event.get("id")
+            if event_id:
+                scores_by_id[event_id] = score_event
+
+        # Combine and categorize events
+        combined_events: dict[str, dict[str, Any]] = {}
+
+        # Process odds events (upcoming/live)
+        for event in odds_events:
+            event_id = event.get("id")
+            if not event_id:
+                continue
+
+            # Check if we have score data for this event
+            score_data = scores_by_id.get(event_id, {})
+            completed = score_data.get("completed", False)
+
+            if completed:
+                game_status = "completed"
+            elif score_data.get("scores"):
+                game_status = "in_progress"
+            else:
+                game_status = "pre_game"
+
+            combined_events[event_id] = {
+                **event,
+                "game_status": game_status,
+                "scores": score_data.get("scores"),
+                "completed": completed,
+            }
+
+        # Add any scored events not in odds (completed games)
+        for event_id, score_event in scores_by_id.items():
+            if event_id not in combined_events:
+                combined_events[event_id] = {
+                    **score_event,
+                    "game_status": "completed" if score_event.get("completed") else "in_progress",
+                    "bookmakers": [],  # No odds for completed games
+                }
+
+        # Filter by date if specified
+        result = list(combined_events.values())
+        if target_date:
+            result = self.filter_events_by_date(result, target_date)
+
+        return result
+
+    def normalize_event_with_status(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Normalize event data including game status and scores.
+
+        Args:
+            event: Event data (may include scores)
+
+        Returns:
+            Normalized dictionary with game_status and scores
+        """
+        # Get base normalized data
+        normalized = self.normalize_event_data(event)
+
+        # Add game status
+        normalized["game_status"] = event.get("game_status", "pre_game")
+        normalized["completed"] = event.get("completed", False)
+
+        # Add scores if available
+        scores = event.get("scores")
+        if scores:
+            home_team = event.get("home_team")
+            away_team = event.get("away_team")
+            home_score = next(
+                (int(s["score"]) for s in scores if s["name"] == home_team),
+                None
+            )
+            away_score = next(
+                (int(s["score"]) for s in scores if s["name"] == away_team),
+                None
+            )
+            normalized["home_score"] = home_score
+            normalized["away_score"] = away_score
+
+            # Determine winner if completed
+            if normalized["completed"] and home_score is not None and away_score is not None:
+                if home_score > away_score:
+                    normalized["winner"] = home_team
+                elif away_score > home_score:
+                    normalized["winner"] = away_team
+                else:
+                    normalized["winner"] = "tie"
+        else:
+            normalized["home_score"] = None
+            normalized["away_score"] = None
+            normalized["winner"] = None
+
+        return normalized
