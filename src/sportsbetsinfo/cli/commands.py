@@ -515,6 +515,110 @@ def _display_analysis(analysis: "Analysis") -> None:
             console.print(f"     {rec.get('interpretation', '')}")
 
 
+@cli.command()
+@click.option("--report", is_flag=True, help="Show aggregate performance report")
+@click.pass_context
+def evaluate(ctx: click.Context, report: bool) -> None:
+    """Evaluate analyses against actual outcomes.
+
+    Computes Brier score, log loss, and ROI for all analyses
+    that have corresponding game outcomes.
+    """
+    from sportsbetsinfo.config.settings import get_settings
+    from sportsbetsinfo.services.evaluator import EvaluationService
+
+    settings = get_settings()
+    service = EvaluationService(settings)
+
+    if report:
+        # Show aggregate report
+        report_data = service.get_aggregate_report()
+
+        if "error" in report_data:
+            console.print(f"[yellow]{report_data['error']}[/yellow]")
+            return
+
+        console.print("\n[bold]Performance Report[/bold]")
+        console.print(f"  Total evaluations: {report_data['total_evaluations']}")
+
+        avg_brier = report_data.get("avg_brier_score")
+        if avg_brier is not None:
+            console.print(f"  Avg Brier score: {avg_brier:.4f}")
+
+        avg_log_loss = report_data.get("avg_log_loss")
+        if avg_log_loss is not None:
+            console.print(f"  Avg log loss: {avg_log_loss:.4f}")
+
+        avg_roi = report_data.get("avg_roi")
+        if avg_roi is not None:
+            console.print(f"  Avg ROI per bet: {avg_roi:+.1%}")
+
+        total_roi = report_data.get("total_roi")
+        if total_roi is not None:
+            console.print(f"  Total ROI: {total_roi:+.2f}")
+
+        edge_wins = report_data.get("edge_bets_won", 0)
+        edge_losses = report_data.get("edge_bets_lost", 0)
+        if edge_wins + edge_losses > 0:
+            console.print(f"\n[bold]Edge Bets:[/bold]")
+            console.print(f"  Won: {edge_wins}")
+            console.print(f"  Lost: {edge_losses}")
+            win_rate = report_data.get("edge_win_rate")
+            if win_rate is not None:
+                console.print(f"  Win rate: {win_rate:.1%}")
+
+        interpretation = report_data.get("interpretation", "")
+        if interpretation:
+            console.print(f"\n[dim]{interpretation}[/dim]")
+
+        return
+
+    # Run evaluations
+    console.print("Evaluating analyses against outcomes...")
+    evaluations = service.evaluate_all_pending()
+
+    if not evaluations:
+        console.print("[yellow]No new evaluations created[/yellow]")
+        console.print("[dim]Either no pending analyses or no matching outcomes[/dim]")
+        return
+
+    table = Table(title="Evaluations Created")
+    table.add_column("Game", style="cyan")
+    table.add_column("Brier", justify="right")
+    table.add_column("Log Loss", justify="right")
+    table.add_column("ROI", justify="right")
+    table.add_column("Edge", justify="right")
+    table.add_column("Result")
+
+    for evaluation in evaluations:
+        notes = evaluation.notes or {}
+        home = notes.get("home_team", "?")[:12]
+        away = notes.get("away_team", "?")[:12]
+        game = f"{away} @ {home}"
+
+        brier = f"{evaluation.metrics.brier_score:.3f}" if evaluation.metrics.brier_score else "-"
+        log_loss = f"{evaluation.metrics.log_loss:.3f}" if evaluation.metrics.log_loss else "-"
+
+        roi = "-"
+        if evaluation.metrics.roi is not None:
+            roi_val = evaluation.metrics.roi
+            roi = f"[green]{roi_val:+.0%}[/green]" if roi_val > 0 else f"[red]{roi_val:+.0%}[/red]"
+
+        edge = "-"
+        if evaluation.metrics.edge_realized is not None:
+            edge_val = evaluation.metrics.edge_realized
+            edge = f"[green]{edge_val:+.1%}[/green]" if edge_val > 0 else f"[red]{edge_val:+.1%}[/red]"
+
+        winner = notes.get("actual_winner", "?")
+        score = notes.get("final_score", "?")
+        result = f"{winner[:10]} ({score})"
+
+        table.add_row(game, brier, log_loss, roi, edge, result)
+
+    console.print(table)
+    console.print(f"\n[green]Created {len(evaluations)} evaluation(s)[/green]")
+
+
 @cli.command("ingest-outcomes")
 @click.option("--sport", default="basketball_nba", help="Sport key for The Odds API")
 @click.option("--days", default=3, help="Days back to fetch scores (1-3)")
