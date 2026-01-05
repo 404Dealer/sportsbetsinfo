@@ -14,15 +14,269 @@ Event-sourced sports betting research platform that builds an immutable timeline
 
 This separation is what makes the system scalable and honest.
 
+## Quick Start
+
+```bash
+# Install dependencies
+pip install -e ".[dev]"
+
+# Initialize database
+sportsbetsinfo init-db
+
+# Collect today's games
+sportsbetsinfo collect-day --sport basketball_nba
+
+# Run analysis (Kalshi vs Vegas comparison)
+sportsbetsinfo analyze --all
+
+# After games complete, ingest outcomes
+sportsbetsinfo ingest-outcomes --sport basketball_nba --days 3
+
+# Score analyses against outcomes
+sportsbetsinfo evaluate --report
+```
+
+## Project Structure
+
+```
+src/sportsbetsinfo/
+├── __init__.py              # Package version (0.1.0)
+├── __main__.py              # CLI entry point
+├── core/                    # Domain models & utilities
+│   ├── models.py            # Frozen dataclasses (InfoSnapshot, Analysis, Outcome, Evaluation, ImprovementProposal)
+│   ├── hashing.py           # SHA-256 content hashing
+│   ├── exceptions.py        # Custom exception hierarchy
+│   └── __init__.py
+├── config/                  # Configuration management
+│   ├── settings.py          # Pydantic BaseSettings (SPORTSBETS_ prefix)
+│   └── __init__.py
+├── db/                      # SQLite layer
+│   ├── schema.py            # DDL + immutability triggers
+│   ├── connection.py        # Connection management
+│   ├── repositories/        # Append-only data access
+│   │   ├── base.py          # ImmutableRepository ABC
+│   │   ├── snapshot.py      # InfoSnapshot CRUD
+│   │   ├── analysis.py      # Analysis DAG operations
+│   │   ├── outcome.py       # Outcome records
+│   │   ├── evaluation.py    # Evaluation scoring
+│   │   ├── proposal.py      # ImprovementProposal (status-updatable)
+│   │   └── __init__.py
+│   └── __init__.py
+├── clients/                 # External API clients
+│   ├── base.py              # BaseAPIClient + RateLimiter
+│   ├── kalshi.py            # Kalshi prediction market API (RSA auth)
+│   ├── odds_api.py          # The Odds API client
+│   └── __init__.py
+├── services/                # Business logic layer
+│   ├── collector.py         # Data collection → InfoSnapshots
+│   ├── analyzer.py          # Kalshi vs Vegas comparison → Analyses
+│   ├── outcomes.py          # Game result ingestion → Outcomes
+│   ├── evaluator.py         # Analysis scoring → Evaluations
+│   └── __init__.py
+└── cli/                     # Click CLI commands
+    ├── commands.py          # All CLI operations
+    └── __init__.py
+```
+
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `sportsbetsinfo init-db` | Create schema + immutability triggers |
+| `sportsbetsinfo status` | Show table row counts |
+| `sportsbetsinfo config` | Display current settings |
+| `sportsbetsinfo collect <game_id>` | Snapshot for specific game |
+| `sportsbetsinfo collect-day [date]` | Snapshot all games on date (defaults today) |
+| `sportsbetsinfo timeline <game_id>` | Show all snapshots for game |
+| `sportsbetsinfo analyze [game_id]` | Create Analysis for specific game |
+| `sportsbetsinfo analyze --all` | Analyze all games with recent snapshots |
+| `sportsbetsinfo ingest-outcomes` | Import final scores from completed games |
+| `sportsbetsinfo evaluate` | Score analyses against outcomes |
+| `sportsbetsinfo evaluate --report` | Generate aggregate performance report |
+| `sportsbetsinfo lineage <analysis_id>` | Show DAG path root→analysis |
+| `sportsbetsinfo verify` | Check all hashes match computed values |
+
+## Core Data Models
+
+All entities are frozen dataclasses with SHA-256 content hashing.
+
+### InfoSnapshot - Market data at time T
+```python
+InfoSnapshot(
+    snapshot_id: str,              # UUID v4
+    game_id: str,                  # Event identifier
+    collected_at: datetime,        # When collected
+    schema_version: str,           # Data shape version (e.g., "1.0.0")
+    source_versions: SourceVersions,  # API versions (kalshi_api, odds_api)
+    raw_payloads: dict[str, Any],  # Original API responses (preserved exactly)
+    normalized_fields: dict[str, Any],  # Standardized computed data
+    hash: str                      # SHA-256 content hash
+)
+```
+
+### Analysis - Derived comparison (DAG structure)
+```python
+Analysis(
+    analysis_id: str,
+    created_at: datetime,
+    analysis_version: str,         # Analysis logic version
+    code_version: str,             # Git commit hash
+    model_version: str | None,     # Optional ML model ID
+    parent_analysis_id: str | None,  # Links in DAG
+    input_snapshot_ids: tuple[str, ...],  # Multiple snapshots
+    derived_features: dict,        # No-vig probs, deltas, liquidity
+    conclusions: dict,             # Analysis summary findings
+    recommended_actions: list[dict],  # Suggested trades/bets
+    hash: str
+)
+```
+
+### Outcome - Ground truth result
+```python
+Outcome(
+    outcome_id: str,
+    game_id: str,                  # Matches InfoSnapshot.game_id
+    occurred_at: datetime,         # When game ended
+    final_score: FinalScore,       # (home: int, away: int)
+    winner: str | None,            # Team name or "tie"
+    stats_summary: dict,           # Game metadata
+    source: str,                   # "odds_api"
+    hash: str
+)
+```
+
+### Evaluation - Scoring analysis vs outcome
+```python
+Evaluation(
+    evaluation_id: str,
+    analysis_id: str,              # Links to Analysis
+    game_id: str,                  # Links to Outcome
+    scored_at: datetime,
+    metrics: EvaluationMetrics,    # (brier_score, log_loss, roi, edge_realized)
+    notes: dict | None,
+    hash: str
+)
+```
+
+### ImprovementProposal - LLM-suggested improvements
+```python
+ImprovementProposal(
+    proposal_id: str,
+    created_at: datetime,
+    based_on_evaluation_ids: tuple[str, ...],  # Evidence-grounded
+    proposal_text: str,
+    suggested_schema_additions: dict | None,
+    suggested_modules: list[str] | None,
+    expected_impact: dict | None,
+    status: ProposalStatus,        # pending → accepted/rejected/implemented
+    hash: str
+)
+```
+
+## Database Schema
+
+```
+info_snapshots          # Market data captures (UNIQUE hash)
+analyses                # Derived comparisons (FK parent_analysis_id self-reference)
+analysis_snapshots      # Many-to-many (Analysis→Snapshot)
+outcomes                # Final scores (UNIQUE game_id)
+evaluations             # Performance metrics (FK analysis_id, game_id)
+improvement_proposals   # LLM suggestions (status field updatable)
+proposal_evaluations    # Many-to-many (Proposal→Evaluation)
+```
+
+**Immutability Enforcement:**
+- SQLite triggers prevent UPDATE/DELETE on all tables (except proposal status)
+- Hash verification on every read
+- Repository layer exposes only insert + read methods
+
+## Service Layer
+
+### DataCollector (`services/collector.py`)
+```python
+async collect_snapshot(game_id, sport)      # Single game
+async collect_bulk_snapshots(sport)         # All upcoming events
+async collect_day_snapshots(date, sport)    # Games on specific date
+compute_deltas(older, newer)                # What changed between snapshots
+get_snapshot_timeline(game_id)              # Full history for game
+```
+
+### AnalysisService (`services/analyzer.py`)
+```python
+analyze_snapshot(snapshot, parent_id)       # Compare Kalshi vs Vegas
+analyze_game(game_id, parent_id)            # Analyze latest snapshot for game
+analyze_all_games(limit)                    # Batch analysis
+```
+
+**Comparison Logic:**
+- Vegas: American odds → implied probability (with vig removal)
+- Kalshi: Mid-point of orderbook (YES bid/ask)
+- Delta = Kalshi prob - Vegas prob
+- Edge threshold: 3% (configurable)
+
+### OutcomeService (`services/outcomes.py`)
+```python
+async ingest_outcomes(sport, days_from)           # Batch ingest completed games
+async ingest_outcome_for_game(game_id, sport)     # Single game
+get_games_needing_outcomes()                       # Games with snapshots but no outcome
+```
+
+### EvaluationService (`services/evaluator.py`)
+```python
+evaluate_all_pending()                      # Score all analyses with outcomes
+evaluate_analysis(analysis_id)              # Score single analysis
+get_aggregate_report()                      # Performance summary
+```
+
+**Metrics:**
+- Brier score: (predicted_prob - actual)^2
+- Log loss: -(actual*log(p) + (1-actual)*log(1-p))
+- ROI: Payout/Cost assuming bet on Vegas odds
+- Edge realized: Directional edge success
+
+## External API Clients
+
+### KalshiClient (`clients/kalshi.py`)
+- **Auth**: RSA-PSS with SHA256 signature
+- **Rate limit**: 10 req/sec (configurable)
+- Key methods: `get_markets()`, `get_odds()`, `normalize_market_data()`
+
+### OddsAPIClient (`clients/odds_api.py`)
+- **Auth**: API key header
+- **Rate limit**: 1 req/sec (conservative for free tier)
+- Key methods: `get_markets()`, `get_scores()`, `calculate_no_vig_probability()`
+
+## Configuration
+
+Environment variables (prefix: `SPORTSBETS_`):
+
+```bash
+SPORTSBETS_DB_PATH=data/sportsbets.db
+SPORTSBETS_SCHEMA_VERSION=1.0.0
+SPORTSBETS_KALSHI_API_KEY=your_key
+SPORTSBETS_KALSHI_PRIVATE_KEY_PATH=/path/to/key.pem
+SPORTSBETS_ODDS_API_KEY=your_key
+SPORTSBETS_KALSHI_RATE_LIMIT=10
+SPORTSBETS_ODDS_API_RATE_LIMIT=1
+SPORTSBETS_LOG_LEVEL=INFO
+```
+
+## Exception Hierarchy
+
+```python
+SportsBetsInfoError (base)
+├── IntegrityError
+│   └── HashMismatchError(entity_type, entity_id, expected, actual)
+├── ImmutabilityViolationError(operation, table)
+├── EntityNotFoundError(entity_type, entity_id)
+├── DuplicateEntityError(entity_type, hash_value)
+├── APIError(client, message, status_code)
+└── ConfigurationError
+```
+
 ## The Conceptual Model: Immutable Timeline of Belief States
 
-### 1. InfoSnapshot - Your ingredients at a timestamp
-
-The only thing that talks to outside reality (APIs).
-
-```
-InfoSnapshot(game_id, collected_at, schema_version, source_versions, raw_payloads, normalized_fields)
-```
+### Why Immutability?
 
 **Key rule**: Snapshots are immutable. Never "update" one - when you re-fetch, create a new snapshot with a new timestamp.
 
@@ -36,68 +290,20 @@ S3 @ 18:50 (10 min pre-tip)
 
 You can always answer: "What did I know at 12:15?"
 
-### 2. Analysis - Derived artifacts, timestamped + versioned
+### Analysis DAG
 
-Analysis is a saved object that references inputs, not "thoughts in your head."
-
-```
-Analysis(analysis_id, created_at, analysis_version, code_version, model_version, parent_analysis_id?, input_snapshot_ids[], derived_features, conclusions, recommended_actions)
-```
-
-**Key rule**: Analysis is also immutable. New analysis creates a new record that points to newer snapshots and optionally the previous analysis as a parent.
-
-This forms a DAG (directed graph), like Git commits:
+Analysis forms a directed acyclic graph, like Git commits:
 ```
 A0 uses S0
 A1 uses S1 and parent=A0
 A2 uses S2 and parent=A1
 ```
 
-This is event sourcing + versioned inference.
+New analysis creates a new record pointing to newer snapshots and optionally the previous analysis as a parent.
 
-### 3. Outcome - Ground truth attached later
+### Full Data Loop
 
-```
-Outcome(game_id, occurred_at, final_score, winner, stats_summary, source)
-```
-
-Now you can evaluate any analysis made earlier against the outcome.
-
-### 4. Evaluation - Scoring analyses against outcomes
-
-Computed metrics: brier score, log_loss, roi, edge_realized, etc.
-
-## Why This Architecture Stays Honest
-
-It separates four things people usually mash together:
-
-1. **Observation** (snapshot, raw + normalized)
-2. **Transformation** (derived features: no-vig implied prob, deltas, liquidity metrics)
-3. **Decision rule** (your strategy / "edge detector")
-4. **Truth** (outcome)
-
-You can improve any layer without corrupting the others.
-
-## What an "Edge" Actually Is
-
-An edge is: "Given what was knowable at time T, my system predicted a probability/price that was systematically better than the market, after costs."
-
-The system must answer:
-- At T, what was Kalshi price? (YES cents)
-- At T, what was Vegas no-vig probability? (from moneylines)
-- At T, what was my model probability? (optional; could start as "Vegas baseline")
-- At T, what was expected value given fees, spread, liquidity, slippage?
-- Later, what happened?
-
-If you see positive expected value AND realized value over time, you have an edge. If not, you have a well-instrumented machine that tells you you don't have an edge (also valuable).
-
-## The Update Loop Mental Model
-
-Each new snapshot = a new frame in a movie.
-
-- Frame = InfoSnapshot
-- Analysis = subtitles added to that frame
-- New frame arrives = create new subtitle track, referencing the old one
+**Snapshot → Analysis → Outcome → Evaluation**
 
 The system can say:
 ```
@@ -106,75 +312,34 @@ At 17:45, with Injury X now OUT and line moved, updated to 61%.
 Here's what changed and why (feature deltas)."
 ```
 
-The "what changed" part is where the tool becomes valuable beyond just another odds scraper.
+## What an "Edge" Actually Is
+
+An edge is: "Given what was knowable at time T, my system predicted a probability/price that was systematically better than the market, after costs."
+
+The system must answer:
+- At T, what was Kalshi price? (YES cents)
+- At T, what was Vegas no-vig probability? (from moneylines)
+- At T, what was expected value given fees, spread, liquidity, slippage?
+- Later, what happened?
+
+If you see positive expected value AND realized value over time, you have an edge.
 
 ## Four Version Axes
 
-### A) Schema version (data shape)
-```
-schema_version = nba_mvp_v1
-```
-- Add fields without breaking old readers = bump minor
-- Change meanings / remove fields = bump major
-
-### B) Data source version (provenance)
-Per snapshot:
-- Which provider for odds/stats/injuries
-- Endpoint versions if relevant
-- `collected_at` always present
-
-### C) Code version (pipeline logic)
-Every analysis/run stores:
-- Git commit hash (or semver tag)
-- Config hash
-
-### D) Model version (if LLM or ML is used)
-- `model_name` + `model_version`
-- Prompt template version
-- Retrieval version (if using RAG)
+1. **Schema version** (data shape): `schema_version = "1.0.0"`
+2. **Data source version** (provenance): Which provider, endpoint versions
+3. **Code version** (pipeline logic): Git commit hash
+4. **Model version** (if LLM/ML): model_name + model_version
 
 This prevents: "it used to work but now it doesn't and we don't know why."
 
-## Database Tables
+## Architectural Rules
 
-```
-info_snapshots
-├── snapshot_id
-├── game_id
-├── collected_at
-├── schema_version
-├── source_map (json)
-├── raw_payloads (json or storage pointer)
-├── normalized_schema (jsonb)
-└── hash
-
-analyses
-├── analysis_id
-├── created_at
-├── analysis_version
-├── parent_analysis_id (nullable)
-├── input_snapshot_ids (array)
-├── code_version
-├── model_version
-├── analysis_output (jsonb)
-├── recommended_actions (jsonb)
-└── hash
-
-outcomes
-├── game_id
-├── finalized_at
-└── result_payload (jsonb)
-
-evaluations
-├── evaluation_id
-├── analysis_id
-├── game_id
-├── scored_at
-├── metrics: brier, log_loss, roi, edge_realized, etc.
-└── notes
-```
-
-Full loop: **Snapshot -> Analysis -> Outcome -> Evaluation**
+1. **Never overwrite** snapshots, analyses, or evaluations. Append only.
+2. **Every record references its parents** (lineage).
+3. **Deterministic transforms only** in derived features (math, not opinions).
+4. **Human/LLM narrative** lives in analysis_output, never mixed into raw data.
+5. **Every automated suggestion** must point to evidence (evaluation IDs).
 
 ## LLM Improvement System (Evidence-Based)
 
@@ -185,102 +350,71 @@ Each evaluation run produces an error record:
 - Which features changed most between winning vs losing calls?
 - Where did delta_prob look big but failed due to liquidity/spread?
 - Where were injuries wrong/late?
-- Which sources were missing?
-- Did we overreact to line movement?
 
-### Improvement Proposals (versioned)
-```
-improvement_proposals
-├── proposal_id
-├── created_at
-├── based_on_evaluation_ids
-├── proposal_text
-├── suggested_schema_additions (json)
-├── suggested_modules (list)
-├── expected_impact (hypothesis)
-└── status (proposed / accepted / rejected)
-```
+### Improvement Proposals
+The LLM becomes a research assistant writing testable hypotheses grounded in evaluation IDs, not a fortune teller.
 
-The LLM becomes a research assistant writing testable hypotheses, not a fortune teller.
+## Development Workflow
 
-## What Makes This Different
+### Adding New Features
 
-Most bettors:
-- Scrape stuff
-- Eyeball it
-- Forget what they knew when
-- Cannot reproduce decisions
-- Cannot measure improvements
+1. **New data field**: Add to normalized_fields, bump schema_version minor
+2. **New analysis type**: Create new service method, store in derived_features
+3. **New data source**: Add client in `clients/`, integrate in DataCollector
 
-This system:
-- Event-sourced market + info history
-- Lineage graph of analyses
-- Evaluation loop
-- Proposal + experiment tracking
-
-It's a mini "quant research platform" scoped to NBA + Kalshi.
-
-## Architectural Rules
-
-1. **Never overwrite** snapshots, analyses, or evaluations. Append only.
-2. **Every record references its parents** (lineage).
-3. **Deterministic transforms only** in derived (math, not opinions).
-4. **Human/LLM narrative** lives in analysis_output, never mixed into raw data.
-5. **Every automated suggestion** must point to evidence (evaluation IDs).
-
-## Immutability Enforcement
-
-- **Python**: Frozen dataclasses prevent mutation
-- **SQLite**: Triggers reject UPDATE/DELETE operations
-- **Repository**: Only insert + read methods exposed
-- **Content hashing**: SHA-256 verification on read
-
-## Build Commands
+### Testing
 
 ```bash
-# Install dependencies
-pip install -e ".[dev]"
+# Run all tests
+pytest
 
-# Initialize database
-sportsbetsinfo init-db
+# With coverage
+pytest --cov=sportsbetsinfo
 
-# Check status
-sportsbetsinfo status
+# Type checking
+mypy src/
 
-# Collect snapshot for today's games
-sportsbetsinfo collect-day --sport basketball_nba
-
-# Collect for specific game
-sportsbetsinfo collect <game_id> --sport basketball_nba
-
-# View timeline
-sportsbetsinfo timeline <game_id>
-
-# Verify integrity
-sportsbetsinfo verify
+# Linting
+ruff check src/
 ```
 
-## Data Sources
+### Build & Dependencies
 
-- **Kalshi**: Prediction market prices (YES/NO cents) - uses RSA key authentication
-- **The Odds API**: Vegas odds from multiple bookmakers
+- **Build system**: Hatchling
+- **Python**: >=3.11
+- **Type checking**: MyPy (strict mode)
+- **Linting**: Ruff
 
-## Project Structure
+Core dependencies: pydantic, pydantic-settings, httpx, click, rich, cryptography
 
-```
-src/sportsbetsinfo/
-├── core/           # Domain models (frozen dataclasses), hashing, exceptions
-├── config/         # Pydantic settings from environment
-├── db/             # SQLite schema, connection, repositories (insert + read only)
-├── clients/        # Kalshi (RSA auth), The Odds API clients
-├── services/       # Data collection, analysis services
-└── cli/            # Click commands
-```
+## Common Development Tasks
 
-## The Minimal Loop (Build This First)
+### Add a new CLI command
 
-1. **Snapshot ingestion**: Pull today's games + Kalshi prices + Vegas odds -> store info_snapshots
-2. **Derived comparison**: Compute no-vig implied prob and delta vs Kalshi -> store analysis object
-3. **Outcome + evaluation**: After games finish, attach results -> compute scoring metrics
+1. Add function in `cli/commands.py` with `@cli.command()` decorator
+2. Use existing services/repositories
+3. Output with `rich` console for formatting
 
-Once that loop exists, the tool is "alive." Everything else is upgrades.
+### Add a new entity type
+
+1. Create frozen dataclass in `core/models.py`
+2. Add hash function in `core/hashing.py`
+3. Create table in `db/schema.py` with immutability trigger
+4. Create repository in `db/repositories/`
+5. Add service methods as needed
+
+### Add a new API client
+
+1. Extend `BaseAPIClient` in `clients/`
+2. Implement `get_markets()`, `get_odds()`, `normalize_*_data()`
+3. Add rate limiting configuration
+4. Integrate in `DataCollector.collect_snapshot()`
+
+## Code Conventions
+
+- **Immutability**: All domain models are frozen dataclasses
+- **Async**: API clients use async/await with httpx
+- **Type hints**: Full type annotations throughout
+- **Repositories**: Only expose insert + read operations
+- **Hashing**: Content-based SHA-256 for integrity verification
+- **No side effects**: Pure functions for transformations
