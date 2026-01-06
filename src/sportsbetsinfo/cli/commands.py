@@ -704,3 +704,30 @@ def config(ctx: click.Context) -> None:
     table.add_row("Odds API Rate Limit", f"{settings.odds_api_rate_limit}/sec")
 
     console.print(table)
+
+
+@cli.command()
+@click.option("--host", default="127.0.0.1", help="Host to bind to")
+@click.option("--port", default=8000, help="Port to bind to")
+@click.option("--reload", is_flag=True, help="Enable auto-reload for development")
+@click.pass_context
+def serve(ctx: click.Context, host: str, port: int, reload: bool) -> None:
+    """Start the web UI server.
+
+    Launches the FastAPI application with uvicorn.
+    """
+    import uvicorn
+
+    console.print(f"[bold green]Starting SportsBetsInfo Web UI[/bold green]")
+    console.print(f"  URL: [cyan]http://{host}:{port}[/cyan]")
+    console.print(f"  Reload: {'enabled' if reload else 'disabled'}")
+    console.print()
+    console.print("[dim]Press Ctrl+C to stop[/dim]")
+    console.print()
+
+    uvicorn.run(
+        "sportsbetsinfo.web.app:app",
+        host=host,
+        port=port,
+        reload=reload,
+    )

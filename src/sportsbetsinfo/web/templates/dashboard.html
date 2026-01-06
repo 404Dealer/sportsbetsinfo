@@ -1,0 +1,191 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="dashboard">
+    <h1>Dashboard</h1>
+
+    <!-- Status Cards -->
+    <div class="status-grid" id="status-grid" hx-get="/api/status" hx-trigger="load" hx-swap="innerHTML">
+        <div class="status-card loading">Loading...</div>
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="actions-section">
+        <h2>Quick Actions</h2>
+        <div class="action-buttons">
+            <button
+                class="btn btn-primary btn-large"
+                hx-post="/api/collect"
+                hx-target="#action-result"
+                hx-swap="innerHTML"
+                hx-indicator="#collect-spinner"
+            >
+                <span class="btn-icon">&#128247;</span>
+                Collect Today's Games
+                <span id="collect-spinner" class="htmx-indicator spinner"></span>
+            </button>
+
+            <button
+                class="btn btn-secondary btn-large"
+                hx-post="/api/analyze"
+                hx-target="#action-result"
+                hx-swap="innerHTML"
+                hx-indicator="#analyze-spinner"
+            >
+                <span class="btn-icon">&#128202;</span>
+                Find Edges
+                <span id="analyze-spinner" class="htmx-indicator spinner"></span>
+            </button>
+
+            <button
+                class="btn btn-accent btn-large"
+                hx-post="/api/evaluate"
+                hx-target="#action-result"
+                hx-swap="innerHTML"
+                hx-indicator="#evaluate-spinner"
+            >
+                <span class="btn-icon">&#127942;</span>
+                Score Predictions
+                <span id="evaluate-spinner" class="htmx-indicator spinner"></span>
+            </button>
+        </div>
+    </div>
+
+    <!-- Action Result -->
+    <div id="action-result" class="action-result"></div>
+
+    <!-- Latest Edges Preview -->
+    <div class="edges-preview">
+        <h2>Latest Edge Opportunities</h2>
+        <div id="edges-preview" hx-get="/api/edges" hx-trigger="load" hx-swap="innerHTML">
+            <div class="loading">Loading edges...</div>
+        </div>
+        <a href="/edges" class="btn btn-outline">View All Edges &rarr;</a>
+    </div>
+</div>
+
+<template id="status-template">
+    <div class="status-card">
+        <div class="status-value" id="snapshots-count">0</div>
+        <div class="status-label">Snapshots</div>
+    </div>
+    <div class="status-card">
+        <div class="status-value" id="analyses-count">0</div>
+        <div class="status-label">Analyses</div>
+    </div>
+    <div class="status-card">
+        <div class="status-value" id="outcomes-count">0</div>
+        <div class="status-label">Outcomes</div>
+    </div>
+    <div class="status-card">
+        <div class="status-value" id="evaluations-count">0</div>
+        <div class="status-label">Evaluations</div>
+    </div>
+</template>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Handle status response
+document.body.addEventListener('htmx:afterRequest', function(evt) {
+    if (evt.detail.pathInfo.requestPath === '/api/status') {
+        const data = JSON.parse(evt.detail.xhr.responseText);
+        const html = `
+            <div class="status-card">
+                <div class="status-value">${data.snapshots}</div>
+                <div class="status-label">Snapshots</div>
+            </div>
+            <div class="status-card">
+                <div class="status-value">${data.analyses}</div>
+                <div class="status-label">Analyses</div>
+            </div>
+            <div class="status-card">
+                <div class="status-value">${data.outcomes}</div>
+                <div class="status-label">Outcomes</div>
+            </div>
+            <div class="status-card">
+                <div class="status-value">${data.evaluations}</div>
+                <div class="status-label">Evaluations</div>
+            </div>
+        `;
+        document.getElementById('status-grid').innerHTML = html;
+    }
+
+    // Handle edges response for preview
+    if (evt.detail.pathInfo.requestPath === '/api/edges') {
+        const data = JSON.parse(evt.detail.xhr.responseText);
+        const edges = data.edges.slice(0, 5); // Top 5
+
+        if (edges.length === 0) {
+            document.getElementById('edges-preview').innerHTML =
+                '<p class="no-data">No edges found. Run analysis first.</p>';
+            return;
+        }
+
+        let html = '<table class="edges-table"><thead><tr>';
+        html += '<th>Game</th><th>Vegas</th><th>Kalshi</th><th>Delta</th><th>Signal</th>';
+        html += '</tr></thead><tbody>';
+
+        for (const edge of edges) {
+            const deltaClass = getDeltaClass(edge.delta_percent);
+            const deltaStr = edge.delta_percent !== null ?
+                `${edge.delta_percent > 0 ? '+' : ''}${edge.delta_percent.toFixed(1)}%` : '-';
+            const signal = getSignal(edge);
+
+            html += `<tr>`;
+            html += `<td class="game-cell">${edge.game}</td>`;
+            html += `<td>${(edge.vegas_prob * 100).toFixed(1)}%</td>`;
+            html += `<td>${edge.kalshi_prob ? (edge.kalshi_prob * 100).toFixed(1) + '%' : '-'}</td>`;
+            html += `<td class="${deltaClass}">${deltaStr}</td>`;
+            html += `<td class="signal-cell">${signal}</td>`;
+            html += `</tr>`;
+        }
+
+        html += '</tbody></table>';
+        html += `<p class="edges-summary">${data.significant_edges} significant edge(s) found</p>`;
+
+        document.getElementById('edges-preview').innerHTML = html;
+    }
+
+    // Handle action responses (collect, analyze, evaluate)
+    if (evt.detail.pathInfo.requestPath.startsWith('/api/') &&
+        evt.detail.requestConfig.verb === 'post') {
+        const data = JSON.parse(evt.detail.xhr.responseText);
+        const resultDiv = document.getElementById('action-result');
+
+        resultDiv.innerHTML = `
+            <div class="alert alert-success">
+                <strong>${data.status}</strong>: ${data.message}
+            </div>
+        `;
+
+        // Refresh status after action
+        htmx.trigger('#status-grid', 'htmx:load');
+
+        // Refresh edges after analyze
+        if (evt.detail.pathInfo.requestPath === '/api/analyze') {
+            htmx.trigger('#edges-preview', 'htmx:load');
+        }
+    }
+});
+
+function getDeltaClass(delta) {
+    if (delta === null) return '';
+    const abs = Math.abs(delta);
+    if (abs >= 5) return 'delta-high';
+    if (abs >= 3) return 'delta-medium';
+    return 'delta-low';
+}
+
+function getSignal(edge) {
+    if (!edge.matched || edge.delta === null) return '-';
+    const abs = Math.abs(edge.delta_percent);
+    if (abs < 3) return '<span class="signal-neutral">~</span>';
+    if (edge.direction === 'kalshi_higher') {
+        return '<span class="signal-kalshi">K&uarr;</span>';
+    } else {
+        return '<span class="signal-vegas">V&uarr;</span>';
+    }
+}
+</script>
+{% endblock %}

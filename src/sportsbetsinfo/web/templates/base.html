@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} | SportsBetsInfo</title>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">
+            <a href="/">SportsBetsInfo</a>
+        </div>
+        <div class="nav-links">
+            <a href="/" class="{% if title == 'SportsBetsInfo' %}active{% endif %}">Dashboard</a>
+            <a href="/edges" class="{% if title == 'Edge Scanner' %}active{% endif %}">Edges</a>
+            <a href="/report" class="{% if title == 'Performance Report' %}active{% endif %}">Report</a>
+        </div>
+    </nav>
+
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="footer">
+        <p>Event-sourced betting research platform &bull; Immutable timeline tracking</p>
+    </footer>
+
+    <script src="/static/js/app.js"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>
