@@ -41,6 +41,10 @@ class Settings(BaseSettings):
         default=None,
         description="Path to Kalshi RSA private key file (.pem)",
     )
+    kalshi_private_key_base64: str = Field(
+        default="",
+        description="Base64-encoded Kalshi RSA private key (alternative to file path for serverless)",
+    )
 
     # The Odds API (https://the-odds-api.com)
     odds_api_key: str = Field(
@@ -73,11 +77,12 @@ class Settings(BaseSettings):
     @property
     def kalshi_configured(self) -> bool:
         """Check if Kalshi API is configured."""
-        return bool(
-            self.kalshi_api_key
-            and self.kalshi_private_key_path
+        has_key_file = (
+            self.kalshi_private_key_path
             and self.kalshi_private_key_path.exists()
         )
+        has_key_base64 = bool(self.kalshi_private_key_base64)
+        return bool(self.kalshi_api_key and (has_key_file or has_key_base64))
 
     @property
     def odds_api_configured(self) -> bool:

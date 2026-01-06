@@ -31,7 +31,8 @@ class KalshiClient(BaseAPIClient):
     def __init__(
         self,
         api_key: str,
-        private_key_path: Path,
+        private_key_path: Path | None = None,
+        private_key_base64: str | None = None,
         rate_limit: float = 10.0,
     ) -> None:
         """Initialize Kalshi client with RSA authentication.
@@ -39,6 +40,7 @@ class KalshiClient(BaseAPIClient):
         Args:
             api_key: Kalshi API key ID (from API keys page)
             private_key_path: Path to RSA private key file (.pem)
+            private_key_base64: Base64-encoded RSA private key (alternative to file)
             rate_limit: Requests per second (default 10)
         """
         super().__init__(
@@ -46,18 +48,29 @@ class KalshiClient(BaseAPIClient):
             rate_limit=rate_limit,
         )
         self.api_key = api_key
-        self._private_key = self._load_private_key(private_key_path)
+        self._private_key = self._load_private_key(private_key_path, private_key_base64)
 
-    def _load_private_key(self, key_path: Path) -> rsa.RSAPrivateKey:
-        """Load RSA private key from file.
+    def _load_private_key(
+        self,
+        key_path: Path | None,
+        key_base64: str | None,
+    ) -> rsa.RSAPrivateKey:
+        """Load RSA private key from file or base64 string.
 
         Args:
             key_path: Path to PEM-encoded private key
+            key_base64: Base64-encoded PEM private key
 
         Returns:
             RSA private key object
         """
-        key_data = key_path.read_bytes()
+        if key_base64:
+            key_data = base64.b64decode(key_base64)
+        elif key_path:
+            key_data = key_path.read_bytes()
+        else:
+            raise APIError("KalshiClient", "No private key provided")
+
         private_key = serialization.load_pem_private_key(key_data, password=None)
         if not isinstance(private_key, rsa.RSAPrivateKey):
             raise APIError("KalshiClient", "Invalid key type: expected RSA private key")
