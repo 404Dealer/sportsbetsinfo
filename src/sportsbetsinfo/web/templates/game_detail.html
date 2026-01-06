@@ -1,0 +1,210 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="game-detail-page">
+    <div class="page-header">
+        <a href="/games" class="back-link">&larr; All Games</a>
+        <h1 id="game-title">Game Timeline</h1>
+    </div>
+
+    <p class="page-subtitle">
+        Belief Drift: How probability estimates evolved over time
+    </p>
+
+    <div class="timeline-chart-container">
+        <canvas id="timeline-chart"></canvas>
+    </div>
+
+    <div id="timeline-stats" class="timeline-stats"></div>
+
+    <div class="snapshots-section">
+        <h2>Snapshot History</h2>
+        <div id="snapshots-table" class="snapshots-table-container">
+            <div class="loading">Loading timeline...</div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const gameId = "{{ game_id }}";
+
+document.addEventListener('DOMContentLoaded', function() {
+    loadTimeline();
+});
+
+async function loadTimeline() {
+    const chartContainer = document.querySelector('.timeline-chart-container');
+    const statsContainer = document.getElementById('timeline-stats');
+    const tableContainer = document.getElementById('snapshots-table');
+
+    try {
+        const response = await fetch(`/api/games/${gameId}/timeline`);
+
+        if (!response.ok) {
+            throw new Error(`Game not found (${response.status})`);
+        }
+
+        const data = await response.json();
+
+        if (!data.timeline || data.timeline.length === 0) {
+            chartContainer.innerHTML = '<div class="empty-state">No snapshots for this game.</div>';
+            return;
+        }
+
+        // Update title
+        const firstPoint = data.timeline[0];
+        if (firstPoint.home_team && firstPoint.away_team) {
+            document.getElementById('game-title').textContent =
+                `${firstPoint.away_team} @ ${firstPoint.home_team}`;
+        }
+
+        // Render chart
+        renderTimelineChart(data.timeline);
+
+        // Render stats
+        const firstTime = new Date(data.timeline[0].collected_at);
+        const lastTime = new Date(data.timeline[data.timeline.length - 1].collected_at);
+        const duration = Math.round((lastTime - firstTime) / (1000 * 60)); // minutes
+
+        statsContainer.innerHTML = `
+            <span><strong>${data.snapshot_count}</strong> snapshots</span>
+            <span>First: ${formatTime(data.timeline[0].collected_at)}</span>
+            <span>Last: ${formatTime(data.timeline[data.timeline.length - 1].collected_at)}</span>
+            <span>Duration: ${duration} minutes</span>
+        `;
+
+        // Render table
+        renderSnapshotsTable(data.timeline);
+
+    } catch (error) {
+        chartContainer.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+        tableContainer.innerHTML = '';
+    }
+}
+
+function renderTimelineChart(timeline) {
+    const ctx = document.getElementById('timeline-chart').getContext('2d');
+
+    const labels = timeline.map(t => formatTime(t.collected_at));
+    const vegasData = timeline.map(t => t.vegas_home_prob ? t.vegas_home_prob * 100 : null);
+    const kalshiData = timeline.map(t => t.kalshi_prob ? t.kalshi_prob * 100 : null);
+
+    new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [
+                {
+                    label: 'Vegas (Home)',
+                    data: vegasData,
+                    borderColor: '#8b5cf6',
+                    backgroundColor: '#8b5cf640',
+                    fill: false,
+                    tension: 0.3,
+                    pointRadius: 5,
+                    pointBackgroundColor: '#8b5cf6',
+                },
+                {
+                    label: 'Kalshi',
+                    data: kalshiData,
+                    borderColor: '#3b82f6',
+                    backgroundColor: '#3b82f640',
+                    fill: false,
+                    tension: 0.3,
+                    pointRadius: 5,
+                    pointBackgroundColor: '#3b82f6',
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: {
+                intersect: false,
+                mode: 'index',
+            },
+            scales: {
+                x: {
+                    title: { display: true, text: 'Time', color: '#9ca3af' },
+                    ticks: { color: '#9ca3af', maxRotation: 45 },
+                    grid: { color: '#374151' },
+                },
+                y: {
+                    title: { display: true, text: 'Home Win Probability %', color: '#9ca3af' },
+                    min: 0,
+                    max: 100,
+                    ticks: { color: '#9ca3af' },
+                    grid: { color: '#374151' },
+                }
+            },
+            plugins: {
+                legend: {
+                    labels: { color: '#9ca3af', font: { size: 14 } }
+                },
+                tooltip: {
+                    callbacks: {
+                        label: function(context) {
+                            const value = context.raw;
+                            if (value === null) return `${context.dataset.label}: No data`;
+                            return `${context.dataset.label}: ${value.toFixed(1)}%`;
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+function renderSnapshotsTable(timeline) {
+    const container = document.getElementById('snapshots-table');
+
+    let html = `
+        <table class="snapshots-detail-table">
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Snapshot</th>
+                    <th>Vegas Home %</th>
+                    <th>Kalshi %</th>
+                    <th>Delta</th>
+                </tr>
+            </thead>
+            <tbody>
+    `;
+
+    for (const point of timeline) {
+        const vegasPct = point.vegas_home_prob ? (point.vegas_home_prob * 100).toFixed(1) + '%' : '-';
+        const kalshiPct = point.kalshi_prob ? (point.kalshi_prob * 100).toFixed(1) + '%' : '-';
+
+        let delta = '-';
+        let deltaClass = '';
+        if (point.vegas_home_prob && point.kalshi_prob) {
+            const d = (point.kalshi_prob - point.vegas_home_prob) * 100;
+            delta = `${d > 0 ? '+' : ''}${d.toFixed(1)}%`;
+            if (Math.abs(d) >= 3) deltaClass = 'delta-significant';
+        }
+
+        html += `
+            <tr>
+                <td>${formatTime(point.collected_at)}</td>
+                <td class="snapshot-id">${point.snapshot_id}</td>
+                <td class="vegas-prob">${vegasPct}</td>
+                <td class="kalshi-prob">${kalshiPct}</td>
+                <td class="${deltaClass}">${delta}</td>
+            </tr>
+        `;
+    }
+
+    html += '</tbody></table>';
+    container.innerHTML = html;
+}
+
+function formatTime(isoString) {
+    if (!isoString) return '-';
+    const date = new Date(isoString);
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+</script>
+{% endblock %}

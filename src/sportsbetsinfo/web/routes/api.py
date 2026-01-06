@@ -376,3 +376,308 @@ def get_game_timeline(game_id: str) -> dict[str, Any]:
         "timeline": timeline,
         "snapshot_count": len(timeline),
     }
+
+
+@router.get("/games")
+def get_games() -> dict[str, Any]:
+    """Get list of all games with snapshots."""
+    from sportsbetsinfo.db.repositories.outcome import OutcomeRepository
+    from sportsbetsinfo.db.repositories.snapshot import SnapshotRepository
+
+    settings = get_settings()
+
+    if not settings.db_path.exists():
+        return {"games": [], "total": 0}
+
+    with get_connection(settings.db_path) as conn:
+        snapshot_repo = SnapshotRepository(conn)
+        outcome_repo = OutcomeRepository(conn)
+
+        snapshots = snapshot_repo.get_all(limit=500)
+        outcomes = outcome_repo.get_all(limit=500)
+
+    # Group snapshots by game_id
+    games_map: dict[str, dict[str, Any]] = {}
+    outcomes_map = {o.game_id: o for o in outcomes}
+
+    for snapshot in snapshots:
+        game_id = snapshot.game_id
+        events = snapshot.normalized_fields.get("odds_api_events", [])
+
+        if game_id not in games_map:
+            games_map[game_id] = {
+                "game_id": game_id,
+                "snapshot_count": 0,
+                "first_snapshot": snapshot.collected_at.isoformat(),
+                "last_snapshot": snapshot.collected_at.isoformat(),
+                "home_team": None,
+                "away_team": None,
+                "has_outcome": game_id in outcomes_map,
+                "winner": None,
+                "final_score": None,
+            }
+
+            if events:
+                event = events[0]
+                games_map[game_id]["home_team"] = event.get("home_team")
+                games_map[game_id]["away_team"] = event.get("away_team")
+
+            if game_id in outcomes_map:
+                outcome = outcomes_map[game_id]
+                games_map[game_id]["winner"] = outcome.winner
+                games_map[game_id]["final_score"] = (
+                    f"{outcome.final_score.away}-{outcome.final_score.home}"
+                )
+
+        games_map[game_id]["snapshot_count"] += 1
+        if snapshot.collected_at.isoformat() > games_map[game_id]["last_snapshot"]:
+            games_map[game_id]["last_snapshot"] = snapshot.collected_at.isoformat()
+
+    games = sorted(games_map.values(), key=lambda g: g["last_snapshot"], reverse=True)
+
+    return {"games": games, "total": len(games)}
+
+
+@router.get("/charts/calibration")
+def get_calibration_data() -> dict[str, Any]:
+    """Get calibration plot data (predicted vs actual outcomes).
+
+    Buckets predictions into probability ranges and calculates
+    actual win rates for each bucket.
+    """
+    from sportsbetsinfo.db.repositories.evaluation import EvaluationRepository
+
+    settings = get_settings()
+
+    if not settings.db_path.exists():
+        return {"buckets": [], "total_evaluations": 0}
+
+    with get_connection(settings.db_path) as conn:
+        repo = EvaluationRepository(conn)
+        evaluations = repo.get_all(limit=10000)
+
+    if not evaluations:
+        return {"buckets": [], "total_evaluations": 0}
+
+    # Define buckets: 0-20%, 20-40%, 40-60%, 60-80%, 80-100%
+    bucket_ranges = [
+        (0.0, 0.2, "0-20%"),
+        (0.2, 0.4, "20-40%"),
+        (0.4, 0.6, "40-60%"),
+        (0.6, 0.8, "60-80%"),
+        (0.8, 1.0, "80-100%"),
+    ]
+
+    buckets: dict[str, dict[str, Any]] = {
+        label: {"label": label, "min": min_p, "max": max_p, "predictions": [], "outcomes": []}
+        for min_p, max_p, label in bucket_ranges
+    }
+
+    for evaluation in evaluations:
+        notes = evaluation.notes or {}
+        vegas_prob = notes.get("vegas_home_prob")
+        home_won = notes.get("home_won")
+
+        if vegas_prob is None or home_won is None:
+            continue
+
+        # Find the bucket
+        for min_p, max_p, label in bucket_ranges:
+            if min_p <= vegas_prob < max_p or (max_p == 1.0 and vegas_prob == 1.0):
+                buckets[label]["predictions"].append(vegas_prob)
+                buckets[label]["outcomes"].append(1.0 if home_won else 0.0)
+                break
+
+    # Calculate actual win rates
+    result_buckets = []
+    for label, data in buckets.items():
+        n = len(data["outcomes"])
+        if n > 0:
+            avg_predicted = sum(data["predictions"]) / n
+            actual_rate = sum(data["outcomes"]) / n
+        else:
+            avg_predicted = (data["min"] + data["max"]) / 2
+            actual_rate = None
+
+        result_buckets.append({
+            "label": label,
+            "avg_predicted": round(avg_predicted, 4),
+            "actual_rate": round(actual_rate, 4) if actual_rate is not None else None,
+            "count": n,
+            "midpoint": (data["min"] + data["max"]) / 2,
+        })
+
+    return {
+        "buckets": result_buckets,
+        "total_evaluations": len(evaluations),
+    }
+
+
+@router.get("/charts/roi-waterfall")
+def get_roi_waterfall() -> dict[str, Any]:
+    """Get cumulative ROI waterfall data.
+
+    Returns chronological sequence of bets with running P&L.
+    """
+    from sportsbetsinfo.db.repositories.evaluation import EvaluationRepository
+
+    settings = get_settings()
+
+    if not settings.db_path.exists():
+        return {"bets": [], "total_roi": 0}
+
+    with get_connection(settings.db_path) as conn:
+        repo = EvaluationRepository(conn)
+        evaluations = repo.get_all(limit=10000)
+
+    if not evaluations:
+        return {"bets": [], "total_roi": 0}
+
+    # Sort by scored_at
+    sorted_evals = sorted(evaluations, key=lambda e: e.scored_at)
+
+    bets = []
+    cumulative = 0.0
+
+    for evaluation in sorted_evals:
+        roi = evaluation.metrics.roi
+        if roi is None:
+            continue
+
+        cumulative += roi
+        notes = evaluation.notes or {}
+
+        bets.append({
+            "date": evaluation.scored_at.isoformat(),
+            "game": f"{notes.get('away_team', '?')} @ {notes.get('home_team', '?')}",
+            "roi": round(roi, 4),
+            "cumulative": round(cumulative, 4),
+            "won": roi > 0,
+        })
+
+    return {
+        "bets": bets,
+        "total_roi": round(cumulative, 4),
+        "total_bets": len(bets),
+    }
+
+
+@router.get("/charts/edge-accuracy")
+def get_edge_accuracy() -> dict[str, Any]:
+    """Get rolling edge accuracy data.
+
+    Shows win rate on edge bets (>3% delta) over time.
+    """
+    from sportsbetsinfo.db.repositories.evaluation import EvaluationRepository
+
+    settings = get_settings()
+
+    if not settings.db_path.exists():
+        return {"points": [], "overall_win_rate": None}
+
+    with get_connection(settings.db_path) as conn:
+        repo = EvaluationRepository(conn)
+        evaluations = repo.get_all(limit=10000)
+
+    if not evaluations:
+        return {"points": [], "overall_win_rate": None}
+
+    # Filter to edge bets only (where edge_realized is not None)
+    edge_evals = [e for e in evaluations if e.metrics.edge_realized is not None]
+
+    if not edge_evals:
+        return {"points": [], "overall_win_rate": None}
+
+    # Sort by scored_at
+    sorted_evals = sorted(edge_evals, key=lambda e: e.scored_at)
+
+    # Calculate rolling win rate (window of 10)
+    window_size = min(10, len(sorted_evals))
+    points = []
+    wins = 0
+    total = 0
+
+    for i, evaluation in enumerate(sorted_evals):
+        won = evaluation.metrics.edge_realized > 0
+        wins += 1 if won else 0
+        total += 1
+
+        # Rolling window
+        if i >= window_size:
+            old_eval = sorted_evals[i - window_size]
+            old_won = old_eval.metrics.edge_realized > 0
+            wins -= 1 if old_won else 0
+
+        current_window = min(total, window_size)
+        win_rate = wins / current_window if current_window > 0 else 0
+
+        notes = evaluation.notes or {}
+        points.append({
+            "date": evaluation.scored_at.isoformat(),
+            "game": f"{notes.get('away_team', '?')} @ {notes.get('home_team', '?')}",
+            "win_rate": round(win_rate, 4),
+            "won": won,
+            "cumulative_wins": sum(
+                1 for e in sorted_evals[: i + 1] if e.metrics.edge_realized > 0
+            ),
+            "cumulative_total": i + 1,
+        })
+
+    # Overall win rate
+    total_wins = sum(1 for e in sorted_evals if e.metrics.edge_realized > 0)
+    overall = total_wins / len(sorted_evals) if sorted_evals else None
+
+    return {
+        "points": points,
+        "overall_win_rate": round(overall, 4) if overall else None,
+        "total_edge_bets": len(sorted_evals),
+        "window_size": window_size,
+    }
+
+
+@router.get("/charts/heatmap")
+def get_heatmap_data() -> dict[str, Any]:
+    """Get market disagreement heatmap data.
+
+    Returns all games with their Kalshi/Vegas delta for visualization.
+    """
+    from sportsbetsinfo.db.repositories.analysis import AnalysisRepository
+
+    settings = get_settings()
+
+    if not settings.db_path.exists():
+        return {"games": [], "analyzed_at": None}
+
+    with get_connection(settings.db_path) as conn:
+        repo = AnalysisRepository(conn)
+        analyses = repo.get_all(limit=1)
+
+    if not analyses:
+        return {"games": [], "analyzed_at": None}
+
+    analysis = analyses[0]
+    comparisons = analysis.derived_features.get("comparisons", [])
+
+    games = []
+    for comp in comparisons:
+        if not comp.get("matched"):
+            continue
+
+        games.append({
+            "game": f"{comp.get('away_team', '?')} @ {comp.get('home_team', '?')}",
+            "home_team": comp.get("home_team", "?"),
+            "delta": comp.get("delta_home", 0),
+            "delta_percent": comp.get("delta_home_percent", 0),
+            "vegas_prob": comp.get("vegas_home_prob", 0),
+            "kalshi_prob": comp.get("kalshi_implied_prob", 0),
+            "direction": comp.get("edge_direction"),
+        })
+
+    # Sort by delta (most negative to most positive for visual flow)
+    games.sort(key=lambda g: g["delta"])
+
+    return {
+        "games": games,
+        "analyzed_at": analysis.created_at.isoformat(),
+        "total_matched": len(games),
+    }

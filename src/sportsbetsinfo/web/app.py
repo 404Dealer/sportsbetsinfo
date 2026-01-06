@@ -1,8 +1,10 @@
 """FastAPI application factory for sportsbetsinfo web UI."""
 
+import os
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -26,8 +28,18 @@ def create_app() -> FastAPI:
         version="0.1.0",
     )
 
-    # Mount static files
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    # Add CORS middleware for API access from different origins
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # Mount static files (skip on Vercel where they're served by CDN)
+    if STATIC_DIR.exists() and not os.environ.get("VERCEL"):
+        app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     # Set up templates
     templates = Jinja2Templates(directory=TEMPLATES_DIR)

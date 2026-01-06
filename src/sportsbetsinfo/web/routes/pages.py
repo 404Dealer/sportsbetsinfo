@@ -36,3 +36,33 @@ async def report_page(request: Request) -> HTMLResponse:
         "report.html",
         {"request": request, "title": "Performance Report"},
     )
+
+
+@router.get("/charts", response_class=HTMLResponse)
+async def charts_page(request: Request) -> HTMLResponse:
+    """Render the charts/visualizations page."""
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        "charts.html",
+        {"request": request, "title": "Charts"},
+    )
+
+
+@router.get("/games", response_class=HTMLResponse)
+async def games_page(request: Request) -> HTMLResponse:
+    """Render the games list page."""
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        "games.html",
+        {"request": request, "title": "Games"},
+    )
+
+
+@router.get("/games/{game_id}", response_class=HTMLResponse)
+async def game_detail_page(request: Request, game_id: str) -> HTMLResponse:
+    """Render the game detail page with belief drift timeline."""
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        "game_detail.html",
+        {"request": request, "title": "Game Timeline", "game_id": game_id},
+    )
