@@ -41,6 +41,7 @@ class DataCollector:
                 self._kalshi = KalshiClient(
                     api_key=self.settings.kalshi_api_key,
                     private_key_path=self.settings.kalshi_private_key_path,
+                    private_key_base64=self.settings.kalshi_private_key_base64 or None,
                     rate_limit=self.settings.kalshi_rate_limit,
                 )
                 await self._kalshi.__aenter__()

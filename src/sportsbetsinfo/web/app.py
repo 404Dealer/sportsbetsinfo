@@ -94,6 +94,8 @@ def create_app() -> FastAPI:
             return JSONResponse(
                 status_code=500,
                 content={
+                    "status": "error",
+                    "message": str(exc),
                     "error": str(exc),
                     "detail": "Internal server error",
                     "path": request.url.path,
