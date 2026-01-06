@@ -1,0 +1,396 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="charts-page">
+    <h1>Analytics Charts</h1>
+    <p class="page-subtitle">Unique visualizations powered by your immutable event-sourced data</p>
+
+    <div class="charts-grid">
+        <!-- Market Disagreement Heatmap -->
+        <div class="chart-card full-width">
+            <h2>Market Disagreement Heatmap</h2>
+            <p class="chart-desc">Where do Kalshi and Vegas disagree? Blue = Vegas higher, Orange = Kalshi higher</p>
+            <div id="heatmap-container" class="chart-container-wide">
+                <div class="loading">Loading heatmap...</div>
+            </div>
+        </div>
+
+        <!-- Calibration Plot -->
+        <div class="chart-card">
+            <h2>Calibration Plot</h2>
+            <p class="chart-desc">When I said 70%, did they win 70% of the time?</p>
+            <div id="calibration-container" class="chart-container">
+                <canvas id="calibration-chart"></canvas>
+            </div>
+            <div id="calibration-stats" class="chart-stats"></div>
+        </div>
+
+        <!-- Edge Accuracy Over Time -->
+        <div class="chart-card">
+            <h2>Edge Accuracy</h2>
+            <p class="chart-desc">Rolling win rate on edge bets (>3% delta)</p>
+            <div id="edge-accuracy-container" class="chart-container">
+                <canvas id="edge-accuracy-chart"></canvas>
+            </div>
+            <div id="edge-accuracy-stats" class="chart-stats"></div>
+        </div>
+
+        <!-- ROI Waterfall -->
+        <div class="chart-card full-width">
+            <h2>ROI Waterfall</h2>
+            <p class="chart-desc">Cumulative P&L if betting $1 on every prediction</p>
+            <div id="roi-waterfall-container" class="chart-container-wide">
+                <canvas id="roi-waterfall-chart"></canvas>
+            </div>
+            <div id="roi-stats" class="chart-stats"></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    loadHeatmap();
+    loadCalibration();
+    loadEdgeAccuracy();
+    loadROIWaterfall();
+});
+
+// Color scales
+const colorVegasHigher = '#3b82f6';  // Blue
+const colorKalshiHigher = '#f97316'; // Orange
+const colorNeutral = '#6b7280';
+const colorPositive = '#22c55e';
+const colorNegative = '#ef4444';
+
+// ============================================
+// HEATMAP
+// ============================================
+async function loadHeatmap() {
+    const container = document.getElementById('heatmap-container');
+
+    try {
+        const response = await fetch('/api/charts/heatmap');
+        const data = await response.json();
+
+        if (!data.games || data.games.length === 0) {
+            container.innerHTML = '<div class="empty-state">No matched games. Run analysis first.</div>';
+            return;
+        }
+
+        renderHeatmap(data.games);
+    } catch (error) {
+        container.innerHTML = `<div class="error">Error loading heatmap: ${error.message}</div>`;
+    }
+}
+
+function renderHeatmap(games) {
+    const container = document.getElementById('heatmap-container');
+
+    let html = '<div class="heatmap">';
+
+    for (const game of games) {
+        const delta = game.delta_percent || 0;
+        const absD = Math.abs(delta);
+        const color = delta < 0 ? colorVegasHigher : delta > 0 ? colorKalshiHigher : colorNeutral;
+        const opacity = Math.min(absD / 10, 1); // Scale: 10% = full opacity
+        const bgColor = `${color}${Math.round(opacity * 255).toString(16).padStart(2, '0')}`;
+
+        html += `
+            <div class="heatmap-row" style="background: ${bgColor}">
+                <span class="heatmap-game">${game.home_team}</span>
+                <span class="heatmap-bar">
+                    <span class="heatmap-fill" style="width: ${Math.min(absD * 5, 100)}%; background: ${color}"></span>
+                </span>
+                <span class="heatmap-value" style="color: ${color}">${delta > 0 ? '+' : ''}${delta.toFixed(1)}%</span>
+            </div>
+        `;
+    }
+
+    html += '</div>';
+    html += `
+        <div class="heatmap-legend">
+            <span><span class="legend-dot" style="background: ${colorVegasHigher}"></span> Vegas Higher</span>
+            <span><span class="legend-dot" style="background: ${colorKalshiHigher}"></span> Kalshi Higher</span>
+        </div>
+    `;
+
+    container.innerHTML = html;
+}
+
+// ============================================
+// CALIBRATION PLOT
+// ============================================
+async function loadCalibration() {
+    const container = document.getElementById('calibration-container');
+    const statsContainer = document.getElementById('calibration-stats');
+
+    try {
+        const response = await fetch('/api/charts/calibration');
+        const data = await response.json();
+
+        if (!data.buckets || data.buckets.length === 0 || data.total_evaluations === 0) {
+            container.innerHTML = '<div class="empty-state">No evaluation data yet.</div>';
+            return;
+        }
+
+        renderCalibration(data.buckets);
+        statsContainer.innerHTML = `<span>${data.total_evaluations} evaluations</span>`;
+    } catch (error) {
+        container.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+    }
+}
+
+function renderCalibration(buckets) {
+    const ctx = document.getElementById('calibration-chart').getContext('2d');
+
+    // Prepare data
+    const labels = buckets.map(b => b.label);
+    const predicted = buckets.map(b => b.avg_predicted * 100);
+    const actual = buckets.map(b => b.actual_rate !== null ? b.actual_rate * 100 : null);
+    const perfect = buckets.map(b => b.midpoint * 100);
+
+    new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [
+                {
+                    label: 'Perfect Calibration',
+                    data: perfect,
+                    borderColor: '#6b7280',
+                    borderDash: [5, 5],
+                    fill: false,
+                    pointRadius: 0,
+                },
+                {
+                    label: 'Actual Win Rate',
+                    data: actual,
+                    borderColor: colorPositive,
+                    backgroundColor: colorPositive + '40',
+                    fill: false,
+                    pointRadius: 6,
+                    pointBackgroundColor: colorPositive,
+                },
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                x: {
+                    title: { display: true, text: 'Predicted Probability', color: '#9ca3af' },
+                    ticks: { color: '#9ca3af' },
+                    grid: { color: '#374151' },
+                },
+                y: {
+                    title: { display: true, text: 'Actual Win Rate %', color: '#9ca3af' },
+                    min: 0,
+                    max: 100,
+                    ticks: { color: '#9ca3af' },
+                    grid: { color: '#374151' },
+                }
+            },
+            plugins: {
+                legend: {
+                    labels: { color: '#9ca3af' }
+                },
+                tooltip: {
+                    callbacks: {
+                        label: function(context) {
+                            return `${context.dataset.label}: ${context.raw?.toFixed(1)}%`;
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+// ============================================
+// EDGE ACCURACY
+// ============================================
+async function loadEdgeAccuracy() {
+    const container = document.getElementById('edge-accuracy-container');
+    const statsContainer = document.getElementById('edge-accuracy-stats');
+
+    try {
+        const response = await fetch('/api/charts/edge-accuracy');
+        const data = await response.json();
+
+        if (!data.points || data.points.length === 0) {
+            container.innerHTML = '<div class="empty-state">No edge bets evaluated yet.</div>';
+            return;
+        }
+
+        renderEdgeAccuracy(data.points);
+
+        const overallPct = data.overall_win_rate ? (data.overall_win_rate * 100).toFixed(1) : '-';
+        const overallClass = data.overall_win_rate > 0.5 ? 'positive' : 'negative';
+        statsContainer.innerHTML = `
+            <span>${data.total_edge_bets} edge bets</span>
+            <span class="${overallClass}">Overall: ${overallPct}%</span>
+        `;
+    } catch (error) {
+        container.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+    }
+}
+
+function renderEdgeAccuracy(points) {
+    const ctx = document.getElementById('edge-accuracy-chart').getContext('2d');
+
+    const labels = points.map((_, i) => i + 1);
+    const winRates = points.map(p => p.win_rate * 100);
+
+    new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [
+                {
+                    label: 'Rolling Win Rate',
+                    data: winRates,
+                    borderColor: '#8b5cf6',
+                    backgroundColor: '#8b5cf640',
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 2,
+                },
+                {
+                    label: '50% Baseline',
+                    data: labels.map(() => 50),
+                    borderColor: '#6b7280',
+                    borderDash: [5, 5],
+                    fill: false,
+                    pointRadius: 0,
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                x: {
+                    title: { display: true, text: 'Bet #', color: '#9ca3af' },
+                    ticks: { color: '#9ca3af' },
+                    grid: { color: '#374151' },
+                },
+                y: {
+                    title: { display: true, text: 'Win Rate %', color: '#9ca3af' },
+                    min: 0,
+                    max: 100,
+                    ticks: { color: '#9ca3af' },
+                    grid: { color: '#374151' },
+                }
+            },
+            plugins: {
+                legend: {
+                    labels: { color: '#9ca3af' }
+                }
+            }
+        }
+    });
+}
+
+// ============================================
+// ROI WATERFALL
+// ============================================
+async function loadROIWaterfall() {
+    const container = document.getElementById('roi-waterfall-container');
+    const statsContainer = document.getElementById('roi-stats');
+
+    try {
+        const response = await fetch('/api/charts/roi-waterfall');
+        const data = await response.json();
+
+        if (!data.bets || data.bets.length === 0) {
+            container.innerHTML = '<div class="empty-state">No bets evaluated yet.</div>';
+            return;
+        }
+
+        renderROIWaterfall(data.bets);
+
+        const totalClass = data.total_roi > 0 ? 'positive' : 'negative';
+        const sign = data.total_roi > 0 ? '+' : '';
+        statsContainer.innerHTML = `
+            <span>${data.total_bets} bets</span>
+            <span class="${totalClass}">Total: ${sign}${data.total_roi.toFixed(2)} units</span>
+        `;
+    } catch (error) {
+        container.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+    }
+}
+
+function renderROIWaterfall(bets) {
+    const ctx = document.getElementById('roi-waterfall-chart').getContext('2d');
+
+    const labels = bets.map((_, i) => i + 1);
+    const cumulative = bets.map(b => b.cumulative);
+    const colors = bets.map(b => b.won ? colorPositive : colorNegative);
+
+    new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [
+                {
+                    label: 'Cumulative P&L',
+                    data: cumulative,
+                    borderColor: '#3b82f6',
+                    backgroundColor: function(context) {
+                        const value = context.raw || 0;
+                        return value >= 0 ? colorPositive + '40' : colorNegative + '40';
+                    },
+                    fill: true,
+                    tension: 0.1,
+                    pointRadius: 3,
+                    pointBackgroundColor: colors,
+                },
+                {
+                    label: 'Break Even',
+                    data: labels.map(() => 0),
+                    borderColor: '#6b7280',
+                    borderDash: [5, 5],
+                    fill: false,
+                    pointRadius: 0,
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                x: {
+                    title: { display: true, text: 'Bet #', color: '#9ca3af' },
+                    ticks: { color: '#9ca3af' },
+                    grid: { color: '#374151' },
+                },
+                y: {
+                    title: { display: true, text: 'Cumulative Units', color: '#9ca3af' },
+                    ticks: { color: '#9ca3af' },
+                    grid: { color: '#374151' },
+                }
+            },
+            plugins: {
+                legend: {
+                    labels: { color: '#9ca3af' }
+                },
+                tooltip: {
+                    callbacks: {
+                        label: function(context) {
+                            const bet = bets[context.dataIndex];
+                            return [
+                                `Cumulative: ${context.raw.toFixed(2)}`,
+                                `Game: ${bet.game}`,
+                                `Result: ${bet.won ? 'Won' : 'Lost'} (${bet.roi > 0 ? '+' : ''}${bet.roi.toFixed(2)})`
+                            ];
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+</script>
+{% endblock %}
