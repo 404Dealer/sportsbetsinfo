@@ -1,0 +1,191 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="report-page">
+    <div class="page-header">
+        <h1>Performance Report</h1>
+        <button
+            class="btn btn-secondary"
+            hx-post="/api/evaluate"
+            hx-target="#eval-result"
+            hx-swap="innerHTML"
+            hx-indicator="#eval-spinner"
+        >
+            Run Evaluations
+            <span id="eval-spinner" class="htmx-indicator spinner"></span>
+        </button>
+    </div>
+
+    <div id="eval-result"></div>
+
+    <div class="report-container" id="report-container" hx-get="/api/report" hx-trigger="load" hx-swap="innerHTML">
+        <div class="loading">Loading report...</div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.body.addEventListener('htmx:afterRequest', function(evt) {
+    if (evt.detail.pathInfo.requestPath === '/api/report') {
+        const data = JSON.parse(evt.detail.xhr.responseText);
+        renderReport(data);
+    }
+
+    if (evt.detail.pathInfo.requestPath === '/api/evaluate') {
+        const data = JSON.parse(evt.detail.xhr.responseText);
+        document.getElementById('eval-result').innerHTML = `
+            <div class="alert alert-success">
+                ${data.message}
+            </div>
+        `;
+        // Refresh report
+        htmx.ajax('GET', '/api/report', {target: '#report-container', swap: 'innerHTML'});
+    }
+});
+
+function renderReport(data) {
+    const container = document.getElementById('report-container');
+
+    if (data.total_evaluations === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <h3>No Evaluations Yet</h3>
+                <p>Collect game snapshots, wait for games to complete, ingest outcomes, then run evaluations.</p>
+                <div class="pipeline-steps">
+                    <div class="step">1. Collect Snapshots</div>
+                    <div class="step-arrow">&rarr;</div>
+                    <div class="step">2. Games Complete</div>
+                    <div class="step-arrow">&rarr;</div>
+                    <div class="step">3. Ingest Outcomes</div>
+                    <div class="step-arrow">&rarr;</div>
+                    <div class="step">4. Run Evaluations</div>
+                </div>
+            </div>
+        `;
+        return;
+    }
+
+    const brierClass = getBrierClass(data.avg_brier_score);
+    const roiClass = data.avg_roi !== null && data.avg_roi > 0 ? 'positive' : 'negative';
+    const edgeWinRateClass = data.edge_win_rate !== null && data.edge_win_rate > 0.5 ? 'positive' : 'negative';
+
+    let html = `
+        <div class="report-grid">
+            <div class="report-card">
+                <div class="report-value">${data.total_evaluations}</div>
+                <div class="report-label">Total Evaluations</div>
+            </div>
+
+            <div class="report-card ${brierClass}">
+                <div class="report-value">${data.avg_brier_score !== null ? data.avg_brier_score.toFixed(4) : '-'}</div>
+                <div class="report-label">Avg Brier Score</div>
+                <div class="report-hint">Lower is better (&lt;0.25 good)</div>
+            </div>
+
+            <div class="report-card">
+                <div class="report-value">${data.avg_log_loss !== null ? data.avg_log_loss.toFixed(4) : '-'}</div>
+                <div class="report-label">Avg Log Loss</div>
+                <div class="report-hint">Lower is better</div>
+            </div>
+
+            <div class="report-card ${roiClass}">
+                <div class="report-value">${data.avg_roi !== null ? formatPercent(data.avg_roi) : '-'}</div>
+                <div class="report-label">Avg ROI per Bet</div>
+            </div>
+        </div>
+
+        <div class="edge-performance">
+            <h2>Edge Bet Performance</h2>
+            <div class="edge-stats">
+                <div class="edge-stat">
+                    <span class="edge-label">Won:</span>
+                    <span class="edge-value positive">${data.edge_bets_won}</span>
+                </div>
+                <div class="edge-stat">
+                    <span class="edge-label">Lost:</span>
+                    <span class="edge-value negative">${data.edge_bets_lost}</span>
+                </div>
+                <div class="edge-stat">
+                    <span class="edge-label">Win Rate:</span>
+                    <span class="edge-value ${edgeWinRateClass}">
+                        ${data.edge_win_rate !== null ? formatPercent(data.edge_win_rate) : '-'}
+                    </span>
+                </div>
+            </div>
+
+            ${data.edge_bets_won + data.edge_bets_lost > 0 ? renderEdgeChart(data) : ''}
+        </div>
+
+        <div class="interpretation">
+            <h3>Summary</h3>
+            <p>${data.interpretation || 'Insufficient data for interpretation.'}</p>
+        </div>
+
+        ${data.total_roi !== null ? `
+        <div class="total-roi ${data.total_roi > 0 ? 'positive' : 'negative'}">
+            <span class="total-roi-label">Cumulative ROI:</span>
+            <span class="total-roi-value">${data.total_roi > 0 ? '+' : ''}${data.total_roi.toFixed(2)} units</span>
+        </div>
+        ` : ''}
+    `;
+
+    container.innerHTML = html;
+
+    // Render chart if we have data
+    if (data.edge_bets_won + data.edge_bets_lost > 0) {
+        renderWinLossChart(data);
+    }
+}
+
+function renderEdgeChart(data) {
+    return `
+        <div class="chart-container">
+            <canvas id="edge-chart" width="300" height="200"></canvas>
+        </div>
+    `;
+}
+
+function renderWinLossChart(data) {
+    const ctx = document.getElementById('edge-chart');
+    if (!ctx) return;
+
+    new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+            labels: ['Won', 'Lost'],
+            datasets: [{
+                data: [data.edge_bets_won, data.edge_bets_lost],
+                backgroundColor: ['#22c55e', '#ef4444'],
+                borderWidth: 0,
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: 'bottom',
+                    labels: {
+                        color: '#9ca3af',
+                        font: { size: 14 }
+                    }
+                }
+            }
+        }
+    });
+}
+
+function getBrierClass(brier) {
+    if (brier === null) return '';
+    if (brier < 0.2) return 'good';
+    if (brier < 0.25) return 'fair';
+    return 'poor';
+}
+
+function formatPercent(value) {
+    const pct = (value * 100).toFixed(1);
+    return value > 0 ? `+${pct}%` : `${pct}%`;
+}
+</script>
+{% endblock %}

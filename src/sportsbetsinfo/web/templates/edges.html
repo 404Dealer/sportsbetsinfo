@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="edges-page">
+    <div class="page-header">
+        <h1>Edge Scanner</h1>
+        <button
+            class="btn btn-secondary"
+            hx-post="/api/analyze"
+            hx-target="#edges-result"
+            hx-swap="innerHTML"
+            hx-indicator="#refresh-spinner"
+        >
+            Refresh Analysis
+            <span id="refresh-spinner" class="htmx-indicator spinner"></span>
+        </button>
+    </div>
+
+    <div id="edges-result"></div>
+
+    <div class="edges-container" id="edges-container" hx-get="/api/edges" hx-trigger="load" hx-swap="innerHTML">
+        <div class="loading">Loading edge data...</div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.body.addEventListener('htmx:afterRequest', function(evt) {
+    if (evt.detail.pathInfo.requestPath === '/api/edges') {
+        const data = JSON.parse(evt.detail.xhr.responseText);
+        renderEdgesTable(data);
+    }
+
+    if (evt.detail.pathInfo.requestPath === '/api/analyze') {
+        const data = JSON.parse(evt.detail.xhr.responseText);
+        document.getElementById('edges-result').innerHTML = `
+            <div class="alert alert-success">
+                ${data.message}
+            </div>
+        `;
+        // Refresh edges table
+        htmx.ajax('GET', '/api/edges', {target: '#edges-container', swap: 'innerHTML'});
+    }
+});
+
+function renderEdgesTable(data) {
+    const container = document.getElementById('edges-container');
+
+    if (data.edges.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <h3>No Edge Data</h3>
+                <p>Run "Collect Today's Games" on the dashboard, then click "Refresh Analysis".</p>
+            </div>
+        `;
+        return;
+    }
+
+    let html = `
+        <div class="edges-meta">
+            <span class="meta-item">
+                <strong>${data.total_games}</strong> games analyzed
+            </span>
+            <span class="meta-item">
+                <strong>${data.matched_games}</strong> matched with Kalshi
+            </span>
+            <span class="meta-item highlight">
+                <strong>${data.significant_edges}</strong> significant edges (&gt;3%)
+            </span>
+            ${data.analyzed_at ? `<span class="meta-item muted">Last updated: ${formatTime(data.analyzed_at)}</span>` : ''}
+        </div>
+
+        <div class="legend">
+            <span class="legend-item"><span class="dot dot-high"></span> &gt;5% edge</span>
+            <span class="legend-item"><span class="dot dot-medium"></span> 3-5% edge</span>
+            <span class="legend-item"><span class="dot dot-low"></span> &lt;3%</span>
+            <span class="legend-item"><span class="signal-kalshi">K&uarr;</span> Kalshi higher</span>
+            <span class="legend-item"><span class="signal-vegas">V&uarr;</span> Vegas higher</span>
+        </div>
+
+        <table class="edges-table edges-table-full">
+            <thead>
+                <tr>
+                    <th class="col-status">Status</th>
+                    <th class="col-game">Game</th>
+                    <th class="col-vegas">Vegas Prob</th>
+                    <th class="col-kalshi">Kalshi Prob</th>
+                    <th class="col-delta">Delta</th>
+                    <th class="col-signal">Signal</th>
+                </tr>
+            </thead>
+            <tbody>
+    `;
+
+    for (const edge of data.edges) {
+        const statusClass = getStatusClass(edge.game_status);
+        const statusLabel = getStatusLabel(edge.game_status);
+        const deltaClass = getDeltaClass(edge.delta_percent);
+        const deltaStr = edge.delta_percent !== null ?
+            `${edge.delta_percent > 0 ? '+' : ''}${edge.delta_percent.toFixed(1)}%` : '-';
+        const signal = getSignal(edge);
+        const rowClass = getRowClass(edge);
+
+        html += `
+            <tr class="${rowClass}">
+                <td class="col-status"><span class="status-badge ${statusClass}">${statusLabel}</span></td>
+                <td class="col-game">${edge.game}</td>
+                <td class="col-vegas">${(edge.vegas_prob * 100).toFixed(1)}%</td>
+                <td class="col-kalshi">${edge.kalshi_prob ? (edge.kalshi_prob * 100).toFixed(1) + '%' : '<span class="no-match">-</span>'}</td>
+                <td class="col-delta ${deltaClass}">${deltaStr}</td>
+                <td class="col-signal">${signal}</td>
+            </tr>
+        `;
+    }
+
+    html += '</tbody></table>';
+
+    container.innerHTML = html;
+}
+
+function getStatusClass(status) {
+    switch (status) {
+        case 'completed': return 'status-final';
+        case 'in_progress': return 'status-live';
+        default: return 'status-pre';
+    }
+}
+
+function getStatusLabel(status) {
+    switch (status) {
+        case 'completed': return 'FINAL';
+        case 'in_progress': return 'LIVE';
+        default: return 'PRE';
+    }
+}
+
+function getDeltaClass(delta) {
+    if (delta === null) return '';
+    const abs = Math.abs(delta);
+    if (abs >= 5) return 'delta-high';
+    if (abs >= 3) return 'delta-medium';
+    return 'delta-low';
+}
+
+function getRowClass(edge) {
+    if (!edge.matched) return 'row-unmatched';
+    if (edge.delta_percent && Math.abs(edge.delta_percent) >= 3) return 'row-edge';
+    return '';
+}
+
+function getSignal(edge) {
+    if (!edge.matched || edge.delta === null) return '<span class="no-match">-</span>';
+    const abs = Math.abs(edge.delta_percent);
+    if (abs < 3) return '<span class="signal-neutral">~</span>';
+    if (edge.direction === 'kalshi_higher') {
+        return '<span class="signal-kalshi" title="Kalshi implies higher probability">K&uarr;</span>';
+    } else {
+        return '<span class="signal-vegas" title="Vegas implies higher probability">V&uarr;</span>';
+    }
+}
+
+function formatTime(isoString) {
+    const date = new Date(isoString);
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+</script>
+{% endblock %}
